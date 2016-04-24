@@ -5,6 +5,7 @@ require 'cunn'
 require 'cudnn'
 require 'NeuralGPU'
 require 'dpnn'
+require 'GPUContainer'
 
 ----------------------------------------------------------------------
 -- parse command-line options
@@ -30,10 +31,8 @@ local layers = {NeuralGPU(opt.gpuSize, true),
                 NeuralGPU(opt.gpuSize, true)}
 
 local neuralGPUStack = nn.Sequential()
-for i=1,opt.seqLen*2+1 do
-   for j=1,#layers do
-      neuralGPUStack:add(layers[j]:sharedClone())
-   end
+for j=1,#layers do
+   neuralGPUStack:add(layers[j]:sharedClone())
 end
 
 local model = nn.Sequential()
@@ -41,7 +40,7 @@ model:add(nn.LookupTable(4, opt.gpuSize))
 model:add(nn.Reshape(opt.batchSize, opt.seqLen*2+1, opt.gpuSize, 1))
 model:add(nn.Transpose({2,3}))
 model:add(nn.SpatialZeroPadding(0, opt.gpuWidth-1, 0, 0))
-model:add(neuralGPUStack)
+model:add(nn.GPUContainer(neuralGPUStack))
 model:add(cudnn.SpatialConvolution(opt.gpuSize, 4, 1, 1))
 model:add(nn.Transpose({2, 3}))
 model:add(nn.Select(4, 1))
