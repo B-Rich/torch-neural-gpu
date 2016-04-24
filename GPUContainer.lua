@@ -1,6 +1,6 @@
 require 'nn'
 
-local GPUContainer, _ = torch.class('nn.GPUContainer', 'nn.Container')
+local GPUContainer, parent = torch.class('nn.GPUContainer', 'nn.Container')
 
 
 function GPUContainer:__init(module)

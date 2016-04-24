@@ -32,7 +32,7 @@ local layers = {NeuralGPU(opt.gpuSize, true),
 
 local neuralGPUStack = nn.Sequential()
 for j=1,#layers do
-   neuralGPUStack:add(layers[j]:sharedClone())
+   neuralGPUStack:add(layers[j])
 end
 
 local model = nn.Sequential()
@@ -141,13 +141,6 @@ function train(dataset)
 
    -- apply curriculum
    if trainAccuracy > 90 then
-      for j=1,#layers do
-         neuralGPUStack:add(layers[j]:sharedClone():cuda())
-      end
-      for j=1,#layers do
-         neuralGPUStack:add(layers[j]:sharedClone():cuda())
-      end
-
       opt.seqLen = opt.seqLen + 1
       model.modules[2] = nn.Reshape(opt.batchSize, opt.seqLen*2+1, opt.gpuSize, 1):cuda()
       model.modules[9] = nn.Reshape(opt.batchSize * (opt.seqLen*2+1), 4):cuda()
