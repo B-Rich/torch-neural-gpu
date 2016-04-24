@@ -1,6 +1,8 @@
 require 'nn'
 require 'optim'
 require 'image'
+require 'cunn'
+require 'cudnn'
 require 'NeuralGPU'
 require 'dpnn'
 
@@ -14,9 +16,9 @@ cmd:text('Neural GPU')
 cmd:text()
 cmd:text('Options:')
 cmd:option('-batchSize', 32, 'batch size')
-cmd:option('-seqLen', 2, 'length of sequences')
-cmd:option('-gpuSize', 16, 'embedding size')
-cmd:option('-gpuWidth', 3, 'gpu width')
+cmd:option('-seqLen', 5, 'length of sequences')
+cmd:option('-gpuSize', 24, 'embedding size')
+cmd:option('-gpuWidth', 4, 'gpu width')
 cmd:option('-updatePerEpoch', 1000, 'updates per epoch')
 cmd:option('-maxEpochs', 1000, 'max number of epochs')
 cmd:text()
@@ -24,23 +26,32 @@ opt = cmd:parse(arg)
 
 dofile('generator.lua')
 
-local neuralGPU = NeuralGPU(opt.gpuSize)
+local layers = {NeuralGPU(opt.gpuSize, true),
+                NeuralGPU(opt.gpuSize, true)}
+
+local neuralGPUStack = nn.Sequential()
+for i=1,opt.seqLen*2+1 do
+   for j=1,#layers do
+      neuralGPUStack:add(layers[j]:sharedClone())
+   end
+end
 
 local model = nn.Sequential()
 model:add(nn.LookupTable(4, opt.gpuSize))
 model:add(nn.Reshape(opt.batchSize, opt.seqLen*2+1, opt.gpuSize, 1))
 model:add(nn.Transpose({2,3}))
 model:add(nn.SpatialZeroPadding(0, opt.gpuWidth-1, 0, 0))
-for i=1,opt.seqLen*2+1 do
-   model:add(neuralGPU:sharedClone())
-end
-model:add(nn.SpatialConvolutionMM(opt.gpuSize, 4, 1, 1))
+model:add(neuralGPUStack)
+model:add(cudnn.SpatialConvolution(opt.gpuSize, 4, 1, 1))
 model:add(nn.Transpose({2, 3}))
 model:add(nn.Select(4, 1))
 model:add(nn.Reshape(opt.batchSize * (opt.seqLen*2+1), 4))
 model:add(nn.LogSoftMax())
 
 local criterion = nn.ClassNLLCriterion()
+
+model:cuda()
+criterion:cuda()
 
 -- retrieve parameters and gradients
 parameters,gradParameters = model:getParameters()
@@ -67,15 +78,18 @@ function train(dataset)
 
    -- do one epoch
    print('<trainer> on training set:')
-   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ']')
+   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. opt.seqLen .. ']')
    for t = 1,opt.updatePerEpoch do
       -- disp progress
       xlua.progress(t, opt.updatePerEpoch)
 
       -- create mini batch
       local inputs, targets = binary_sum_batch(opt.batchSize, opt.seqLen)
-         
+
       targets = targets:view(opt.batchSize * (opt.seqLen*2+1))
+
+      inputs = inputs:cuda()
+      targets = targets:cuda()
 
       -- create closure to evaluate f(X) and df/dX
       local feval = function(x)
@@ -99,6 +113,8 @@ function train(dataset)
             -- update confusion
             confusion:add(outputs[i], targets[i])
          end
+
+         trainError = trainError + f
 
          -- return f and df/dX
          return f,gradParameters
@@ -124,13 +140,33 @@ function train(dataset)
    -- next epoch
    epoch = epoch + 1
 
+   -- apply curriculum
+   if trainAccuracy > 90 then
+      for j=1,#layers do
+         neuralGPUStack:add(layers[j]:sharedClone():cuda())
+      end
+      for j=1,#layers do
+         neuralGPUStack:add(layers[j]:sharedClone():cuda())
+      end
+
+      opt.seqLen = opt.seqLen + 1
+      model.modules[2] = nn.Reshape(opt.batchSize, opt.seqLen*2+1, opt.gpuSize, 1):cuda()
+      model.modules[9] = nn.Reshape(opt.batchSize * (opt.seqLen*2+1), 4):cuda()
+   end
+
    return trainAccuracy, trainError
 end
 
 for i=1,opt.maxEpochs do
    trainAcc, trainErr = train()
-   
+
    -- update logger
    accLogger:add{['% train accuracy'] = trainAcc, ['% test accuracy'] = testAcc}
    errLogger:add{['% train error']    = trainErr, ['% test error']    = testErr}
+
+   -- plot logger
+   accLogger:style{['% train accuracy'] = '-', ['% test accuracy'] = '-'}
+   errLogger:style{['% train error']    = '-', ['% test error']    = '-'}
+   accLogger:plot()
+   errLogger:plot()
 end
