@@ -6,6 +6,7 @@ require 'cudnn'
 require 'NeuralGPU'
 require 'dpnn'
 require 'GPUContainer'
+require 'utils'
 
 ----------------------------------------------------------------------
 -- parse command-line options
@@ -16,12 +17,13 @@ cmd:text()
 cmd:text('Neural GPU')
 cmd:text()
 cmd:text('Options:')
-cmd:option('-batchSize', 16, 'batch size')
+cmd:option('-batchSize', 8, 'batch size')
 cmd:option('-maxLen', 20, 'length of sequences')
 cmd:option('-gpuSize', 24, 'embedding size')
 cmd:option('-gpuWidth', 4, 'gpu width')
 cmd:option('-updatePerEpoch', 1000, 'updates per epoch')
 cmd:option('-maxEpochs', 1000, 'max number of epochs')
+cmd:option('-evalEpoch', 10, 'how often to perform evaluation')
 cmd:text()
 opt = cmd:parse(arg)
 
@@ -34,7 +36,7 @@ local neuralGPUStack = nn.Sequential()
 for j=1,#layers do
    neuralGPUStack:add(layers[j])
 end
---neuralGPUStack:add(nn.Dropout(0.05))
+neuralGPUStack:add(nn.Dropout(0.05))
 local model = nn.Sequential()
 model:add(nn.LookupTable(4, opt.gpuSize))
 model:add(nn.Reshape(-1, opt.gpuSize, 1, true))
@@ -61,9 +63,6 @@ print(#parameters)
 print('Using model:')
 print(model)
 
-classes = {'0', '1', '+', 'pad'}
-confusion = optim.ConfusionMatrix(classes)
-
 -- log results to files
 accLogger = optim.Logger(paths.concat('log', 'accuracy.log'))
 errLogger = optim.Logger(paths.concat('log', 'error.log'   ))
@@ -76,10 +75,12 @@ function train(epoch)
    -- local vars
    local time = sys.clock()
    local trainError = 0
+   local correct = 0
+   optimState = optimState or {learningRate=1e-3, epsilon = 1e-3}
 
    -- do one epoch
    print('<trainer> on training set:')
-   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. currMaxLen .. ']')
+   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. currMaxLen .. ', LR = ' .. optimState.learningRate .. ']')
    for t = 1,opt.updatePerEpoch do
       -- disp progress
       xlua.progress(t, opt.updatePerEpoch)
@@ -94,10 +95,10 @@ function train(epoch)
 
       local inputs, targets = binary_sum_batch(opt.batchSize, trainLen)
 
-      targets = targets:view(opt.batchSize * (trainLen*2+1))
+      local flat_targets = targets:view(opt.batchSize * (trainLen*2+1))
 
       inputs = inputs:cuda()
-      targets = targets:cuda()
+      flat_targets = flat_targets:cuda()
 
       -- create closure to evaluate f(X) and df/dX
       local feval = function(x)
@@ -111,41 +112,38 @@ function train(epoch)
 
          -- estimate f
          local outputs = model:forward(inputs)
-         local f = criterion:forward(outputs, targets)
+         local f = criterion:forward(outputs, flat_targets)
 
          -- estimate df/dW
-         local df_do = criterion:backward(outputs, targets)
+         local df_do = criterion:backward(outputs, flat_targets)
          model:backward(inputs, df_do)
 
-         for i=1,targets:size(1) do
-            -- update confusion
-            confusion:add(outputs[i], targets[i])
-         end
+         local _, preds = outputs:max(2)
+
+         correct = correct + seq_equal(preds:double():reshape(targets:size()), targets)
 
          trainError = trainError + f
 
-         gradParameters:clamp(-1, 1)
+         gradParameters:clamp(-0.1, 0.1)
          -- return f and df/dX
          return f,gradParameters
       end
 
-      config = config or {learningRate=1e-3, epsilon = 1e-3}
       optim.adam(feval, parameters, config)
    end
 
    -- train error
    trainError = trainError / opt.updatePerEpoch
-
+   correct = correct / opt.batchSize / opt.updatePerEpoch
    -- time taken
    time = sys.clock() - time
    time = time / opt.updatePerEpoch
    print("<trainer> time to learn 1 sample = " .. (time*1000) .. 'ms')
    print("Gradient norm = " .. gradParameters:norm())
 
-   -- print confusion matrix
-   print(confusion)
-   local trainAccuracy = confusion.totalValid * 100
-   confusion:zero()
+   -- print accuracy
+   local trainAccuracy = correct * 100
+   print('Training accuracy = ' .. trainAccuracy .. '%')
 
    -- apply curriculum
    if trainAccuracy > 90 then
@@ -160,6 +158,7 @@ function test(epoch, currMaxLen)
    -- local vars
    local time = sys.clock()
    local testError = 0
+   local correct = 0
 
    -- do one epoch
    print('<trainer> on test set:')
@@ -172,37 +171,37 @@ function test(epoch, currMaxLen)
 
       local inputs, targets = binary_sum_batch(opt.batchSize, currMaxLen)
 
-      targets = targets:view(opt.batchSize * (currMaxLen*2+1))
+      local flat_targets = targets:view(opt.batchSize * (currMaxLen*2+1))
 
       inputs = inputs:cuda()
-      targets = targets:cuda()
+      flat_targets = flat_targets:cuda()
 
       -- estimate f
       local outputs = model:forward(inputs)
 
-      for i=1,targets:size(1) do
-         -- update confusion
-         confusion:add(outputs[i], targets[i])
-      end
+      local _, preds = outputs:max(2)
+      --print(preds:double():reshape(targets:size())[1])
+      --print(targets[1])
+      correct = correct + seq_equal(preds:double():reshape(targets:size()), targets)
    end
 
    -- train error
    testError = testError / opt.updatePerEpoch
+   correct = correct / opt.batchSize / opt.updatePerEpoch
 
    -- time taken
    time = sys.clock() - time
    time = time / opt.updatePerEpoch
    print("<trainer> time to evaluate 1 sample = " .. (time*1000) .. 'ms')
 
-   -- print confusion matrix
-   print(confusion)
-   local testAccuracy = confusion.totalValid * 100
-   confusion:zero()
+   -- print accuracy
+   local testAccuracy = correct * 100
+   print('Test accuracy = ' .. testAccuracy .. '%')
 
    return testAccuracy, testError
 end
 
-testLens = {20, 40, 60, 80}
+testLens = {25, 50, 75}
 testAccs = {}
 testErrs = {}
 
@@ -215,15 +214,15 @@ for epoch=1,opt.maxEpochs do
    model:training()
    trainAcc, trainErr = train(epoch)
 
-   if epoch % 10 == 0 then
+   if epoch % opt.evalEpoch == 0 then
       accsPlot = {}
       errsPlot = {}
 
       for j=1,#testLens do
          model:evaluate()
          testAcc, testErr = test(epoch, testLens[j])
-         testAccs[j][epoch/10] = testAcc
-         testErrs[j][epoch/10] = testErr
+         testAccs[j][epoch/opt.evalEpoch] = testAcc
+         testErrs[j][epoch/opt.evalEpoch] = testErr
          accsPlot[j] = {tostring(testLens[j]), torch.Tensor(testAccs[j]), '-'}
          errsPlot[j] = {tostring(testLens[j]), torch.Tensor(testErrs[j]), '-'}
       end
