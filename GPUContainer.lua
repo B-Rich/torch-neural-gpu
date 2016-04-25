@@ -5,11 +5,11 @@ local GPUContainer, parent = torch.class('nn.GPUContainer', 'nn.Container')
 
 function GPUContainer:__init(module)
    parent.__init(self)
-   self.module = module
+   self.modules = {module}
 end
 
 function GPUContainer:add()
-   local new_module = self.module:sharedClone()
+   local new_module = self.modules[1]:sharedClone()
    if #self.modules == 0 then
       self.gradInput = new_module.gradInput
    end
@@ -32,7 +32,7 @@ end
 
 function GPUContainer:updateGradInput(input, gradOutput)
    local currentGradOutput = gradOutput
-   local currentModule = self.modules[#self.modules]
+   local currentModule = self.modules[input:size(3)]
    for i=input:size(3)-1,1,-1 do
       local previousModule = self.modules[i]
       currentGradOutput = self:rethrowErrors(currentModule, i+1, 'updateGradInput', previousModule.output, currentGradOutput)
@@ -61,7 +61,7 @@ end
 function GPUContainer:backward(input, gradOutput, scale)
    scale = scale or 1
    local currentGradOutput = gradOutput
-   local currentModule = self.modules[#self.modules]
+   local currentModule = self.modules[input:size(3)]
    for i=input:size(3)-1,1,-1 do
       local previousModule = self.modules[i]
       currentGradOutput = self:rethrowErrors(currentModule, i+1, 'backward', previousModule.output, currentGradOutput, scale)
@@ -75,7 +75,7 @@ end
 
 function GPUContainer:accUpdateGradParameters(input, gradOutput, lr)
    local currentGradOutput = gradOutput
-   local currentModule = self.modules[#self.modules]
+   local currentModule = self.modules[input:size(3)]
    for i=input:size(3)-1,1,-1 do
       local previousModule = self.modules[i]
       self:rethrowErrors(currentModule, i+1, 'accUpdateGradParameters', previousModule.output, currentGradOutput, lr)

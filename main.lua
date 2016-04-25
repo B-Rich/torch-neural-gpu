@@ -17,7 +17,7 @@ cmd:text('Neural GPU')
 cmd:text()
 cmd:text('Options:')
 cmd:option('-batchSize', 32, 'batch size')
-cmd:option('-seqLen', 5, 'length of sequences')
+cmd:option('-maxLen', 20, 'length of sequences')
 cmd:option('-gpuSize', 24, 'embedding size')
 cmd:option('-gpuWidth', 4, 'gpu width')
 cmd:option('-updatePerEpoch', 1000, 'updates per epoch')
@@ -27,24 +27,24 @@ opt = cmd:parse(arg)
 
 dofile('generator.lua')
 
-local layers = {NeuralGPU(opt.gpuSize, true),
-                NeuralGPU(opt.gpuSize, true)}
+local layers = {NeuralGPU(opt.gpuSize, false),
+                NeuralGPU(opt.gpuSize, false)}
 
 local neuralGPUStack = nn.Sequential()
 for j=1,#layers do
    neuralGPUStack:add(layers[j])
 end
-
+--neuralGPUStack:add(nn.Dropout(0.05))
 local model = nn.Sequential()
 model:add(nn.LookupTable(4, opt.gpuSize))
-model:add(nn.Reshape(opt.batchSize, opt.seqLen*2+1, opt.gpuSize, 1))
+model:add(nn.Reshape(-1, opt.gpuSize, 1, true))
 model:add(nn.Transpose({2,3}))
 model:add(nn.SpatialZeroPadding(0, opt.gpuWidth-1, 0, 0))
 model:add(nn.GPUContainer(neuralGPUStack))
-model:add(cudnn.SpatialConvolution(opt.gpuSize, 4, 1, 1))
 model:add(nn.Transpose({2, 3}))
 model:add(nn.Select(4, 1))
-model:add(nn.Reshape(opt.batchSize * (opt.seqLen*2+1), 4))
+model:add(nn.Reshape(-1, opt.gpuSize, false))
+model:add(nn.Linear(opt.gpuSize, 4))
 model:add(nn.LogSoftMax())
 
 local criterion = nn.ClassNLLCriterion()
@@ -55,6 +55,7 @@ criterion:cuda()
 -- retrieve parameters and gradients
 parameters,gradParameters = model:getParameters()
 
+print(#parameters)
 -- verbose
 print('Using model:')
 print(model)
@@ -66,26 +67,33 @@ confusion = optim.ConfusionMatrix(classes)
 accLogger = optim.Logger(paths.concat('log', 'accuracy.log'))
 errLogger = optim.Logger(paths.concat('log', 'error.log'   ))
 
--- training function
-function train(dataset)
-   -- epoch tracker
-   epoch = epoch or 1
+currMaxLen = 1
+trainLen = 1
 
+-- training function
+function train(epoch)
    -- local vars
    local time = sys.clock()
    local trainError = 0
 
    -- do one epoch
    print('<trainer> on training set:')
-   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. opt.seqLen .. ']')
+   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. currMaxLen .. ']')
    for t = 1,opt.updatePerEpoch do
       -- disp progress
       xlua.progress(t, opt.updatePerEpoch)
 
       -- create mini batch
-      local inputs, targets = binary_sum_batch(opt.batchSize, opt.seqLen)
 
-      targets = targets:view(opt.batchSize * (opt.seqLen*2+1))
+      if math.random() < 0.8 then
+         trainLen = currMaxLen
+      else
+         trainLen = math.random(currMaxLen)
+      end
+
+      local inputs, targets = binary_sum_batch(opt.batchSize, trainLen)
+
+      targets = targets:view(opt.batchSize * (trainLen*2+1))
 
       inputs = inputs:cuda()
       targets = targets:cuda()
@@ -115,11 +123,12 @@ function train(dataset)
 
          trainError = trainError + f
 
+         gradParameters:clamp(-1, 1)
          -- return f and df/dX
          return f,gradParameters
       end
 
-      config = config or {}
+      config = config or {learningRate=1e-3, epsilon = 1e-3}
       optim.adam(feval, parameters, config)
    end
 
@@ -136,29 +145,87 @@ function train(dataset)
    local trainAccuracy = confusion.totalValid * 100
    confusion:zero()
 
-   -- next epoch
-   epoch = epoch + 1
-
    -- apply curriculum
    if trainAccuracy > 90 then
-      opt.seqLen = opt.seqLen + 1
-      model.modules[2] = nn.Reshape(opt.batchSize, opt.seqLen*2+1, opt.gpuSize, 1):cuda()
-      model.modules[9] = nn.Reshape(opt.batchSize * (opt.seqLen*2+1), 4):cuda()
+      currMaxLen = math.min(currMaxLen + 1, opt.maxLen)
    end
 
    return trainAccuracy, trainError
 end
 
-for i=1,opt.maxEpochs do
-   trainAcc, trainErr = train()
+-- training function
+function test(epoch, currMaxLen)
+   -- local vars
+   local time = sys.clock()
+   local testError = 0
 
-   -- update logger
-   accLogger:add{['% train accuracy'] = trainAcc, ['% test accuracy'] = testAcc}
-   errLogger:add{['% train error']    = trainErr, ['% test error']    = testErr}
+   -- do one epoch
+   print('<trainer> on test set:')
+   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. currMaxLen .. ']')
+   for t = 1,opt.updatePerEpoch do
+      -- disp progress
+      xlua.progress(t, opt.updatePerEpoch)
 
-   -- plot logger
-   accLogger:style{['% train accuracy'] = '-', ['% test accuracy'] = '-'}
-   errLogger:style{['% train error']    = '-', ['% test error']    = '-'}
-   accLogger:plot()
-   errLogger:plot()
+      -- create mini batch
+
+      local inputs, targets = binary_sum_batch(opt.batchSize, currMaxLen)
+
+      targets = targets:view(opt.batchSize * (currMaxLen*2+1))
+
+      inputs = inputs:cuda()
+      targets = targets:cuda()
+
+      -- estimate f
+      local outputs = model:forward(inputs)
+
+      for i=1,targets:size(1) do
+         -- update confusion
+         confusion:add(outputs[i], targets[i])
+      end
+   end
+
+   -- train error
+   testError = testError / opt.updatePerEpoch
+
+   -- time taken
+   time = sys.clock() - time
+   time = time / opt.updatePerEpoch
+   print("<trainer> time to evaluate 1 sample = " .. (time*1000) .. 'ms')
+
+   -- print confusion matrix
+   print(confusion)
+   local testAccuracy = confusion.totalValid * 100
+   confusion:zero()
+
+   return testAccuracy, testError
+end
+
+testLens = {20, 40}
+testAccs = {}
+testErrs = {}
+
+for j=1,#testLens do
+   testAccs[j] = {}
+   testErrs[j] = {}
+end
+
+for epoch=1,opt.maxEpochs do
+   model:training()
+   trainAcc, trainErr = train(epoch)
+
+   if epoch % 10 == 0 then
+      accsPlot = {}
+      errsPlot = {}
+
+      for j=1,#testLens do
+         model:evaluate()
+         testAcc, testErr = test(epoch, testLens[j])
+         testAccs[j][epoch/10] = testAcc
+         testErrs[j][epoch/10] = testErr
+         accsPlot[j] = {tostring(testLens[j]), torch.Tensor(testAccs[j]), '-'}
+         errsPlot[j] = {tostring(testLens[j]), torch.Tensor(testErrs[j]), '-'}
+      end
+      require 'gnuplot'
+      gnuplot.plot(accsPlot)
+   end
 end

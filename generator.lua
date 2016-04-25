@@ -11,16 +11,17 @@ function binary_sum_batch(batchSize, n)
    input[{{},{1,n}}]:random(0, 1):round()
    input[{{},n+1}]:fill(2)
    input[{{},{n+2,2*n+1}}]:random(0, 1):round()
-   
+
    local reminder = torch.zeros(batchSize)
    for i=1,n do
       target[{{},i}] = input[{{},i}]+input[{{},i+n+1}]+reminder
       reminder:copy(target[{{},i}] / 2):floor()
       target[{{},i}]:copy(target[{{},i}] % 2)
    end
+   target[{{},n+1}] = reminder
 
    input:add(1)
    target:add(1)
-   
+
    return input, target
 end
