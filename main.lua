@@ -16,7 +16,7 @@ cmd:text()
 cmd:text('Neural GPU')
 cmd:text()
 cmd:text('Options:')
-cmd:option('-batchSize', 32, 'batch size')
+cmd:option('-batchSize', 16, 'batch size')
 cmd:option('-maxLen', 20, 'length of sequences')
 cmd:option('-gpuSize', 24, 'embedding size')
 cmd:option('-gpuWidth', 4, 'gpu width')
@@ -48,6 +48,7 @@ model:add(nn.Linear(opt.gpuSize, 4))
 model:add(nn.LogSoftMax())
 
 local criterion = nn.ClassNLLCriterion()
+criterion.sizeAverage = false
 
 model:cuda()
 criterion:cuda()
@@ -139,6 +140,7 @@ function train(epoch)
    time = sys.clock() - time
    time = time / opt.updatePerEpoch
    print("<trainer> time to learn 1 sample = " .. (time*1000) .. 'ms')
+   print("Gradient norm = " .. gradParameters:norm())
 
    -- print confusion matrix
    print(confusion)
@@ -200,7 +202,7 @@ function test(epoch, currMaxLen)
    return testAccuracy, testError
 end
 
-testLens = {20, 40}
+testLens = {20, 40, 60, 80}
 testAccs = {}
 testErrs = {}
 
