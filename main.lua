@@ -17,12 +17,12 @@ cmd:text()
 cmd:text('Neural GPU')
 cmd:text()
 cmd:text('Options:')
-cmd:option('-batchSize', 8, 'batch size')
+cmd:option('-batchSize', 16, 'batch size')
 cmd:option('-maxLen', 20, 'length of sequences')
 cmd:option('-gpuSize', 24, 'embedding size')
 cmd:option('-gpuWidth', 4, 'gpu width')
-cmd:option('-updatePerEpoch', 1000, 'updates per epoch')
-cmd:option('-maxEpochs', 1000, 'max number of epochs')
+cmd:option('-updatePerEpoch', 100, 'updates per epoch')
+cmd:option('-maxEpochs', 10000, 'max number of epochs')
 cmd:option('-evalEpoch', 10, 'how often to perform evaluation')
 cmd:text()
 opt = cmd:parse(arg)
@@ -35,8 +35,8 @@ local layers = {NeuralGPU(opt.gpuSize, false),
 local neuralGPUStack = nn.Sequential()
 for j=1,#layers do
    neuralGPUStack:add(layers[j])
+   neuralGPUStack:add(nn.Dropout(0.05))
 end
-neuralGPUStack:add(nn.Dropout(0.05))
 local model = nn.Sequential()
 model:add(nn.LookupTable(4, opt.gpuSize))
 model:add(nn.Reshape(-1, opt.gpuSize, 1, true))
@@ -69,6 +69,8 @@ errLogger = optim.Logger(paths.concat('log', 'error.log'   ))
 
 currMaxLen = 1
 trainLen = 1
+globalStep = 0
+prevErr = 1.0
 
 -- training function
 function train(epoch)
@@ -76,6 +78,8 @@ function train(epoch)
    local time = sys.clock()
    local trainError = 0
    local correct = 0
+   local current = 0
+
    optimState = optimState or {learningRate=1e-3, epsilon = 1e-3}
 
    -- do one epoch
@@ -90,7 +94,7 @@ function train(epoch)
       if math.random() < 0.8 then
          trainLen = currMaxLen
       else
-         trainLen = math.random(currMaxLen)
+         trainLen = math.random(opt.maxLen)
       end
 
       local inputs, targets = binary_sum_batch(opt.batchSize, trainLen)
@@ -110,6 +114,8 @@ function train(epoch)
          -- reset gradients
          gradParameters:zero()
 
+         globalStep = globalStep + 1
+
          -- estimate f
          local outputs = model:forward(inputs)
          local f = criterion:forward(outputs, flat_targets)
@@ -120,11 +126,20 @@ function train(epoch)
 
          local _, preds = outputs:max(2)
 
-         correct = correct + seq_equal(preds:double():reshape(targets:size()), targets)
+         if trainLen == currMaxLen then
+            local batchAcc = seq_equal(preds:double():reshape(targets:size()), targets)
+            correct = correct + batchAcc
+            current = current + 1
+            prevErr = (1 - batchAcc / opt.batchSize)
+         end
 
          trainError = trainError + f
 
-         gradParameters:clamp(-0.1, 0.1)
+         gradParameters:clamp(-1, 1)
+
+         local noise = torch.rand(gradParameters:size()):cuda() * math.pow(globalStep, -0.55) * prevErr
+--         gradParameters:add(noise)
+
          -- return f and df/dX
          return f,gradParameters
       end
@@ -134,7 +149,7 @@ function train(epoch)
 
    -- train error
    trainError = trainError / opt.updatePerEpoch
-   correct = correct / opt.batchSize / opt.updatePerEpoch
+   correct = correct / opt.batchSize / current
    -- time taken
    time = sys.clock() - time
    time = time / opt.updatePerEpoch
@@ -201,7 +216,7 @@ function test(epoch, currMaxLen)
    return testAccuracy, testError
 end
 
-testLens = {25, 50, 75}
+testLens = {30, 40}
 testAccs = {}
 testErrs = {}
 
