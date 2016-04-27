@@ -17,7 +17,7 @@ cmd:text()
 cmd:text('Neural GPU')
 cmd:text()
 cmd:text('Options:')
-cmd:option('-batchSize', 16, 'batch size')
+cmd:option('-batchSize', 32, 'batch size')
 cmd:option('-maxLen', 20, 'length of sequences')
 cmd:option('-gpuSize', 24, 'embedding size')
 cmd:option('-gpuWidth', 4, 'gpu width')
@@ -50,7 +50,6 @@ model:add(nn.Linear(opt.gpuSize, 4))
 model:add(nn.LogSoftMax())
 
 local criterion = nn.ClassNLLCriterion()
-criterion.sizeAverage = false
 
 model:cuda()
 criterion:cuda()
@@ -80,11 +79,11 @@ function train(epoch)
    local correct = 0
    local current = 0
 
-   optimState = optimState or {learningRate=1e-3, epsilon = 1e-3}
+   optimState = optimState or {learningRate=1e-3}
 
    -- do one epoch
    print('<trainer> on training set:')
-   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. currMaxLen .. ', LR = ' .. optimState.learningRate .. ']')
+   print("<trainer> online epoch # " .. epoch .. ' [batchSize = ' .. opt.batchSize .. ', seqLen = ' .. currMaxLen .. ', LR = ' .. optimState.learningRate .. ', Grad noise = ' .. math.pow(globalStep, -0.55) .. ']')
    for t = 1,opt.updatePerEpoch do
       -- disp progress
       xlua.progress(t, opt.updatePerEpoch)
@@ -134,17 +133,15 @@ function train(epoch)
          end
 
          trainError = trainError + f
-
          gradParameters:clamp(-1, 1)
 
-         local noise = torch.rand(gradParameters:size()):cuda() * math.pow(globalStep, -0.55) * prevErr
---         gradParameters:add(noise)
+         local noise = torch.randn(gradParameters:size()):cuda() * math.sqrt(math.pow(globalStep, -0.55)) * prevErr * 1e-10
+         gradParameters:add(noise)
 
-         -- return f and df/dX
          return f,gradParameters
       end
 
-      optim.adam(feval, parameters, config)
+      optim.adamax(feval, parameters, optimState)
    end
 
    -- train error
@@ -184,9 +181,9 @@ function test(epoch, currMaxLen)
 
       -- create mini batch
 
-      local inputs, targets = binary_sum_batch(opt.batchSize, currMaxLen)
+      local inputs, targets = binary_sum_batch(1, currMaxLen)
 
-      local flat_targets = targets:view(opt.batchSize * (currMaxLen*2+1))
+      local flat_targets = targets:view(1 * (currMaxLen*2+1))
 
       inputs = inputs:cuda()
       flat_targets = flat_targets:cuda()
@@ -216,7 +213,7 @@ function test(epoch, currMaxLen)
    return testAccuracy, testError
 end
 
-testLens = {30, 40}
+testLens = {30, 40, 50}
 testAccs = {}
 testErrs = {}
 
@@ -234,6 +231,7 @@ for epoch=1,opt.maxEpochs do
       errsPlot = {}
 
       for j=1,#testLens do
+         collectgarbage()
          model:evaluate()
          testAcc, testErr = test(epoch, testLens[j])
          testAccs[j][epoch/opt.evalEpoch] = testAcc
