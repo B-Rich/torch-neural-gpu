@@ -7,6 +7,7 @@ require 'NeuralGPU'
 require 'dpnn'
 require 'GPUContainer'
 require 'utils'
+local pastalog = require 'pastalog'
 
 ----------------------------------------------------------------------
 -- parse command-line options
@@ -133,15 +134,17 @@ function train(epoch)
          end
 
          trainError = trainError + f
-         gradParameters:clamp(-1, 1)
+         gradParameters:clamp(-0.1, 0.1)
 
          local noise = torch.randn(gradParameters:size()):cuda() * math.sqrt(math.pow(globalStep, -0.55)) * prevErr * 1e-10
          gradParameters:add(noise)
 
+         pastalog('model1', 'gradNorm01', gradParameters:norm(), globalStep)
+
          return f,gradParameters
       end
 
-      optim.adamax(feval, parameters, optimState)
+      optim.adam(feval, parameters, optimState)
    end
 
    -- train error
@@ -199,7 +202,7 @@ function test(epoch, currMaxLen)
 
    -- train error
    testError = testError / opt.updatePerEpoch
-   correct = correct / opt.batchSize / opt.updatePerEpoch
+   correct = correct / opt.updatePerEpoch
 
    -- time taken
    time = sys.clock() - time
@@ -213,7 +216,7 @@ function test(epoch, currMaxLen)
    return testAccuracy, testError
 end
 
-testLens = {30, 40, 50}
+testLens = {10, 20, 30, 40, 50}
 testAccs = {}
 testErrs = {}
 
